@@ -1,25 +1,28 @@
 ﻿// ReSharper disable InconsistentNaming
-using System.Runtime.CompilerServices;
-using Aurea.Maintenance.Debugger.Common.Extensions;
-using Aurea.TaskToaster;
 
 namespace Aurea.Maintenance.Debugger.Stream
 {
     using System;
-    using System.Linq;
-    using System.Text;
-    using Common;
-    using Common.Models;
-    using CIS.BusinessEntity;
     using System.Collections;
+    using System.Collections.Generic;
     using System.Data;
     using System.Data.SqlClient;
-
-    using System.Collections.Generic;
+    using System.Diagnostics;
+    using System.Globalization;
     using System.IO;
+    using System.Linq;
     using System.Reflection;
-    using Aurea.Logging;
+    using System.Runtime.CompilerServices;
+    using System.Text;
 
+    using Aurea.Logging;
+    using Aurea.Maintenance.Debugger.Common.Extensions;
+    using Aurea.TaskToaster;
+
+    using Common;
+    using Common.Models;
+
+    using CIS.BusinessEntity;
 
     public class MyExport : CIS.Clients.Stream.Export.MainProcess
     {
@@ -64,6 +67,7 @@ namespace Aurea.Maintenance.Debugger.Stream
         static void Main(string[] args)
         {
             #region oldCases
+
             /*
             SimulatePostEnrollmentEvent(clientConfiguration);
             CreateMockData();
@@ -71,30 +75,62 @@ namespace Aurea.Maintenance.Debugger.Stream
             Simulate_AESCIS_11221();
             Simulate_AESCIS_19713();
             
-
-            // copy customers from paes
-            var paesCustIds = new List<int> { 762940, 762939, 762931, 762928, 762894, 762885, 762884, 762872, 762865, 762863 };
-            CopyCustomerFromProd(paesCustIds);
-
             
 
             //copy customers from saes
             var saesCustIds = new List<int> { 762884, 762872, 762865, 762706, 762664, 697013, 696563, 695975, 695962, 695922 };
             CopyCustomerFromUA(saesCustIds);
 
+            // copy customers from paes
+            var paesCustIds = new List<int> {766783, 766775, 765715, 759617};
+            CopyCustomerFromProd(paesCustIds);
+
+            Simulate_AESCIS_20523();
 
              */
+
             #endregion
 
 
+            var resp = "Y";
+            while ("Y".Equals(resp, StringComparison.InvariantCultureIgnoreCase))
+            {
+                Simulate_AESCIS_21100(514433, 20433953);
 
-            Simulate_AESCIS_19713_2();
-
-
-
+                Console.WriteLine("do you want to Repeat call");
+                resp = Console.ReadLine().Trim();
+            }
 
             _logger.Info("Debug session has ended");
             Console.ReadLine();
+        }
+
+        private static void Simulate_AESCIS_21100(int custId, int invoiceId)
+        {
+#if DEBUG
+            if (Debugger.IsAttached)
+            {
+                Debugger.Break();
+            }
+#endif
+            // TODO: uncomment when you need to copy customer
+            //CopyCustomerFromProd(new List<int> {custId});
+
+            DB.ExecuteQuery($"DELETE FROM InvoiceXML WHERE InvoiceId = {invoiceId}", _appConfig.ConnectionCsr);
+
+            InvoiceDebugger.InvoiceXmlGeneration(_appConfig, _clientConfig, invoiceId);
+            InvoiceDebugger.InvoicePdfGeneration(invoiceId);
+        }
+
+        private static void Simulate_AESCIS_20523()
+        {
+            var myExport = new MyExport(_appConfig.ConnectionMarket, _appConfig.ConnectionCsr, _clientConfig.ConnectionBillingAdmin);
+
+            GenerateEvents(new List<int> { 10 });
+            ProcessEvents();
+
+            // export 814
+            myExport.MyCreateMarket814();
         }
 
         private static void CopyCustomerFromProd(List<int> custIds)
@@ -102,13 +138,7 @@ namespace Aurea.Maintenance.Debugger.Stream
             custIds.ForEach((custId) =>
             {
                 var sql = string.Format(MockData.Scripts.CustomerExportScript, custId, 5);
-                DB.ImportRecordsFromQuery(
-                    sql,
-                    _appConfig.ConnectionCsr
-                        .Replace("daes_", "paes_")
-                        .Replace("SGISUSEUAV01.aesua.local", "SGISUSEPRV01.aesprod.local"),
-                    _appConfig.ConnectionCsr,
-                    _appDir);
+                DB.ImportQueryResultsFromProduction(sql, _appConfig.ConnectionCsr, _appDir);
             });
         }
 
@@ -117,24 +147,8 @@ namespace Aurea.Maintenance.Debugger.Stream
             custIds.ForEach((custId) =>
             {
                 var sql = string.Format(MockData.Scripts.CustomerExportScript, custId, 5);
-                DB.ImportRecordsFromQuery(
-                    sql,
-                    _appConfig.ConnectionCsr.Replace("daes_", "saes_"),
-                    _appConfig.ConnectionCsr,
-                    _appDir);
+                DB.ImportQueryResultsFromUa( sql, _appConfig.ConnectionCsr, _appDir);
             });
-        }
-
-        private static void Simulate_AESCIS_19713_2()
-        {
-            var myExport = new MyExport(_appConfig.ConnectionMarket, _appConfig.ConnectionCsr, _clientConfig.ConnectionBillingAdmin);
-            DB.ImportFiles(_mockDataDir, "New-C1", _appConfig.ConnectionCsr);
-
-            GenerateEvents(new List<int> { 10 });
-            ProcessEvents();
-
-            // export 814
-            myExport.MyCreateMarket814();
         }
 
         private static void Simulate_AESCIS_19713()
@@ -157,7 +171,6 @@ namespace Aurea.Maintenance.Debugger.Stream
             enrollmentPromotion.ProcessEnrollments();
         }
 
-
         private static void GenerateEvents(List<int> eventTypeIds)
         {
             var list = CIS.Element.Core.Event.EventTypeList.Load(_clientConfig.ClientId);
@@ -169,7 +182,6 @@ namespace Aurea.Maintenance.Debugger.Stream
                 new CIS.Engine.Event.EventGenerator().GenerateEvent(_clientConfig.ClientId, htParams, _clientConfig.Client, _appConfig.ConnectionCsr, _clientConfig.ConnectionBillingAdmin, _event.AssemblyName, _event.ClassName);
             });
         }
-
 
         private static void ProcessEvents()
         {
@@ -482,6 +494,109 @@ namespace Aurea.Maintenance.Debugger.Stream
                 SELECT @CustomerEventActionQueueId, 28, 'A', 0
                 ";
             DB.ExecuteQuery(sqlString, _appConfig.ConnectionCsr);
+        }
+    }
+
+    public static class DecimalUtils
+    {
+        public static decimal ParseInvariantDecimal(this string str)
+        {
+            return decimal.Parse(str, NumberStyles.Any, CultureInfo.InvariantCulture);
+        }
+
+        public static decimal ParseDecimal(this string str)
+        {
+            return decimal.Parse(str.ReplaceNull(",", "."), NumberStyles.Any, CultureInfo.InvariantCulture);
+        }
+
+        public static string ToInvariantDecimalString(this decimal dec)
+        {
+            return dec.ToString(CultureInfo.InvariantCulture);
+        }
+
+        public static decimal MoneyRound(this decimal d)
+        {
+            return decimal.Round(d, 2, MidpointRounding.AwayFromZero);
+        }
+
+        public static decimal MoneyRound(this decimal d, int decimals)
+        {
+            return decimal.Round(d, decimals, MidpointRounding.AwayFromZero);
+        }
+
+        public static string ToInvariantDecimalString(this decimal? source)
+        {
+            return source.HasValue ? source.Value.ToInvariantDecimalString() : string.Empty;
+        }
+
+        public static bool Between(decimal number, decimal? start, decimal? end, bool inclusive)
+        {
+            if (start != null)
+            {
+                if (inclusive)
+                {
+                    if (number < start.Value)
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    if (number <= start.Value)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            if (end != null)
+            {
+                if (inclusive)
+                {
+                    if (number > end.Value)
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    if (number >= end.Value)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        public static decimal ToDecimal(this double d)
+        {
+            return Convert.ToDecimal(d);
+        }
+
+        public static decimal? TryParseInvariantDecimal(this string str)
+        {
+            decimal d;
+
+            if (decimal.TryParse(str, NumberStyles.Any, CultureInfo.InvariantCulture, out d))
+            {
+                return d;
+            }
+
+            return null;
+        }
+
+        public static decimal? TryParseInvariantDecimal(this string str, CultureInfo cultureInfo)
+        {
+            decimal d;
+
+            if (decimal.TryParse(str, NumberStyles.Any, cultureInfo, out d))
+            {
+                return d;
+            }
+
+            return null;
         }
     }
 }

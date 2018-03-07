@@ -24,6 +24,7 @@ namespace Aurea.Maintenance.Debugger.Texpo
     using System.Collections.Generic;
     using CIS.Framework.Data;
     using Util = CIS.Framework.Data.Utility;
+    using System.Xml;
 
     public class Program
     {
@@ -269,15 +270,126 @@ b1x3zeE1G4Q4
             notification.SendEmailJob(37, emailParams);
 
             Simulate_AESCIS_8679();
-
+            
+            Simulate_AESCIS_11082();
 			*/
             #endregion
+            
+            var resp = "Y";
+            while ("Y".Equals(resp, StringComparison.InvariantCultureIgnoreCase))
+            {
+                Simulate_AESCIS_20385(372012);
 
-
-            Simulate_AESCIS_11082();
-
+                Console.WriteLine("do you want to Repeat call");
+                resp = Console.ReadLine().Trim();
+            }
             _logger.Info("Debug session has ended");
             Console.ReadLine();
+        }
+
+        private static void Simulate_AESCIS_20385(int custId)
+        {
+            var prodConnectionString = _appConfig.ConnectionCsr
+                .Replace("daes_", "paes_")
+                .Replace("SGISUSEUAV01.aesua.local", "SGISUSEPRV01.aesprod.local");
+            
+            var maxTransactionDate = DB.ReadSingleValue<DateTime>($"SELECT MAX(TransactionDate) FROM CustomerTransactionRequest WHERE CustId = {custId} AND TransactionType='867'", prodConnectionString).ToString("yyyy-MM-ddT00:00:00");
+
+
+
+            DB.ImportQueryResultsFromProduction(
+                string.Format(MockData.SqlScripts.CustomerExportScript, custId, 10),
+                _appConfig.ConnectionCsr,
+                _appDir,
+                (xmlFileName, connectionString) =>
+                {
+                    DB.ExecuteQuery("DISABLE TRIGGER ALL ON PaymentDetail;", connectionString);
+                    DB.ExecuteQuery("DISABLE TRIGGER ALL ON AccountsReceivableHistory;", connectionString);
+                    
+
+                    var doc = new XmlDocument();
+                    doc.Load(xmlFileName);
+
+                    XmlNamespaceManager nsMgr = new XmlNamespaceManager(doc.NameTable);
+                    var rootNode = doc.SelectSingleNode("root", nsMgr);
+                    if (rootNode == null)
+                    {
+                        _logger.Error("Root element not found, can't process the xml");
+                        return;
+                    }
+
+                    // do necessary changes here
+                    var lastCustomerTransactionRequest = doc.SelectSingleNode("(//CustomerTransactionRequest)[last()]", nsMgr);
+                    while (lastCustomerTransactionRequest.Attributes["TransactionType"].Value == "650" )
+                    {
+                        rootNode.RemoveChild(lastCustomerTransactionRequest);
+                        lastCustomerTransactionRequest = doc.SelectSingleNode("(//CustomerTransactionRequest)[last()]", nsMgr);
+                    }
+
+                    var lastPayment = doc.SelectSingleNode("(//Payment)[last()]", nsMgr);
+                    rootNode.RemoveChild(lastPayment);
+
+
+                    var lastPaymentDetail = doc.SelectSingleNode("(//PaymentDetail)[last()]", nsMgr);
+                    rootNode.RemoveChild(lastPaymentDetail);
+
+                    var lastCustomerDisconnect = doc.SelectSingleNode("(//CustomerDisconnect)[last()]", nsMgr);
+                    lastCustomerDisconnect.Attributes["StatusID"].Value = "4";
+
+                    var lastServiceOrder = doc.SelectSingleNode("(//ServiceOrder)[last()]", nsMgr);
+                    rootNode.RemoveChild(lastServiceOrder);
+
+
+                    doc.Save(xmlFileName);
+                },
+                connectionString =>
+                {
+                    DB.ExecuteQuery("ENABLE TRIGGER ALL ON PaymentDetail;", connectionString);
+                    DB.ExecuteQuery("ENABLE TRIGGER ALL ON AccountsReceivableHistory;", connectionString);
+
+                    // delete latest CTRs might be created previous test runs
+                    var sql = $"DELETE FROM CustomerTransactionRequest WHERE CustId = {custId}  AND TransactionType='650' AND TransactionDate>'{maxTransactionDate}'";
+                    DB.ExecuteQuery(sql, connectionString);
+
+
+                    //delete previous Payment records
+                    var acctsRecHistId = 12043579;
+                    var paymentId = DB.ReadSingleValue<int>($"SELECT PaymentID FROM PaymentDetail WHERE CustId = {custId} AND AcctsRecHistId = {acctsRecHistId}", connectionString, 0);
+                    sql = $"DELETE FROM PaymentDetail WHERE PaymentID = {paymentId}";
+                    DB.ExecuteQuery(sql, connectionString);
+                    sql = $"DELETE FROM Payment WHERE PaymentID = {paymentId}";
+                    DB.ExecuteQuery(sql, connectionString);
+
+                    
+
+
+                    // make new payment here to trigger EventEvalutionQueue Insert
+                    sql = $@"
+DECLARE @CustId INT = {custId}
+DECLARE @PaymentID INT
+
+INSERT INTO Payment (Type, PaidDate, PostDate, Amount, Agent, UserId, flag1, flag2)
+SELECT 'CreditCard', '2018-01-25 16:59:57.717', '2018-01-25 16:59:57.830', 378.38, 'C.A.S.H-CSR', 373052, 0, 0
+
+SET @PaymentId = SCOPE_IDENTITY()
+
+INSERT INTO PaymentDetail (PaymentId, CustId, AcctsRecHistId, CustNo, Comment, Amount, DateStamp, flag1, flag2)
+SELECT @PaymentId, {custId}, {acctsRecHistId}, '{custId}', 'Vendor Transaction Id 5A6A617FC9FE8DC47463F5786F12649828385431, Customer Transaction Id 7679571, CSR - CASH', 378.38, '2018-01-25 16:59:57.830', 0, 0
+
+";
+                    DB.ExecuteQuery(sql, connectionString);
+
+
+                }
+            );
+
+
+            
+            //EventEvaluationQueue
+            GenerateEvents(new List<int> { 27 });
+
+            ProcessEvents();
+
         }
 
         private static void Simulate_AESCIS_11082()
