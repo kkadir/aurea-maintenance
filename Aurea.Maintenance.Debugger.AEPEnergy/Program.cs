@@ -1,4 +1,6 @@
-﻿namespace Aurea.Maintenance.Debugger.AEPEnergy
+﻿using System.Xml;
+
+namespace Aurea.Maintenance.Debugger.AEPEnergy
 {
     using System;
     using System.Collections.Generic;
@@ -72,16 +74,274 @@
 
         static void Main(string[] args)
         {
-            //Simulate_AESCIS17193("4184386");
-            //simulate_AESCIS16615_WS();
-            //Simulate_AESCIS16615("AESCIS-16615-Basic", 19981, 543, DateTime.Parse("2017-12-05T23:31:41-06:00"), "N", DateTime.Today.Date);
-            //Simulate_AESCIS16615("AESCIS-16615-C4", 116549, 605, DateTime.Parse("2017-12-24T05:18:12-06:00"), "N", DateTime.Today.Date);
-            //Simulate_AESCIS16615_AfterRateTransitionSkipImport();
-            //prepData2Simulate_AESCIS_16615_onUA();
+            #region old cases
+            /*
+
+            Simulate_AESCIS17193("4184386");
+            simulate_AESCIS16615_WS();
+            Simulate_AESCIS16615("AESCIS-16615-Basic", 19981, 543, DateTime.Parse("2017-12-05T23:31:41-06:00"), "N", DateTime.Today.Date);
+            Simulate_AESCIS16615("AESCIS-16615-C4", 116549, 605, DateTime.Parse("2017-12-24T05:18:12-06:00"), "N", DateTime.Today.Date);
+            Simulate_AESCIS16615_AfterRateTransitionSkipImport();
+            prepData2Simulate_AESCIS_16615_onUA();
             Simulate_AESCIS16615_AfterRateTransitionDoImport("14");
+            */
+            #endregion
+
+            var resp = "Y";
+            while ("Y".Equals(resp, StringComparison.InvariantCultureIgnoreCase))
+            {
+                //SimulateRollover_AESCIS_16615_From814CAccept(125489);
+                SimulateChangeProductRequest_AESCIS_16615_From814CAccept(131679);
+                
+                Console.WriteLine("Do you want to repeat scenario (Y/N)");
+                resp = Console.ReadLine().Trim();
+            }
 
             _logger.Info("Debug Session has ended");
             Console.ReadKey();
+        }
+
+        private static void SimulateChangeProductRequest_AESCIS_16615_From814CAccept(int custId)
+        {
+            // delete the previous tests data
+            var cleanOldTestArtifacts = $@"
+-- delete last inbound 814_C 
+DELETE t FROM (SELECT TOP 1 * FROM CustomerTransactionRequest WHERE CustId = {custId} AND TransactionType = '814' AND ActionCode = 'C' AND Direction = 1 ORDER BY 1 DESC) t
+
+-- delete rateDetails
+ALTER TABLE RateDetail DISABLE TRIGGER ALL
+DELETE FROM RateDetail WHERE RateId IN (SELECT RateId FROM Customer WHERE CustId = {custId} ) AND NOT EXISTS(SELECT 1 FROM InvoiceDetail WHERE RateDetId = RateDetail.RateDetId)
+DELETE FROM RateDetailHistory WHERE RateId IN (SELECT RateId FROM Customer WHERE CustId = {custId} )
+ALTER TABLE RateDetail ENABLE TRIGGER ALL
+
+-- delete changeRequests
+ALTER TABLE ChangeRequest DISABLE TRIGGER ALL
+DELETE FROM ChangeRequest WHERE CustomerID = {custId}
+DELETE FROM ChangeRequestHistory WHERE CustomerID = {custId}
+ALTER TABLE ChangeRequest ENABLE TRIGGER ALL
+
+-- delete rateTransitions
+ALTER TABLE RateTransition DISABLE TRIGGER ALL
+DELETE FROM RateTransition WHERE CustId = {custId}
+DELETE FROM RateTransitionHistory WHERE CustId = {custId}
+ALTER TABLE RateTransition ENABLE TRIGGER ALL
+
+-- disable EventEvaluationQueue
+UPDATE EventEvaluationQueue SET Status = 1 
+
+";
+            DB.ExecuteQuery(cleanOldTestArtifacts, _appConfig.ConnectionCsr);
+
+            var sql = string.Format(MockData.ExportScripts.ExportCustomer4Simulate814CAccept, custId);
+            DB.ImportQueryResultsFromProduction(sql, _appConfig.ConnectionCsr, _appDirectory,
+                (path, connectionString) =>
+                {
+                    var doc = new XmlDocument();
+                    doc.Load(path);
+                    
+                    XmlNamespaceManager nsMgr = new XmlNamespaceManager(doc.NameTable);
+                    var rootNode = doc.SelectSingleNode("root", nsMgr);
+
+                    var changeRequest = doc.SelectSingleNode("(//ChangeRequest)[last()]", nsMgr);
+                    /*
+                     ChangeRequestStatusID	Description
+                     1	                    new
+                     2	                    pending approval
+                     3	                    approved
+                     4	                    rejected
+                     5	                    processed
+                     6	                    error
+                     7	                    scheduled
+                     8	                    pending market approval
+                     9	                    market approved
+                     10                 	market rejected
+                     11                 	cancelled
+                    */
+                    changeRequest.Attributes["StatusID"].Value = "8";
+
+                    var lastRateTransition = doc.SelectSingleNode("(//RateTransition)[last()]", nsMgr);
+                    /*
+                     -1 Failed, 1 Pending, 2 Complete, 5 Market Approved
+                     */ 
+                    lastRateTransition.Attributes["StatusID"].Value = "1";
+                    var lastRtSwitchDate = DateTime.Parse(lastRateTransition.Attributes["SwitchDate"].Value);
+                    lastRateTransition.Attributes["EndDate"].Value = lastRtSwitchDate.AddMonths(12).ToString("yyyy-MM-ddT00:00:00");
+
+
+                    var lastCTR = doc.SelectSingleNode("(//CustomerTransactionRequest)[last()]", nsMgr);
+                    while (lastCTR.Attributes["TransactionType"].Value != "814"
+                           || lastCTR.Attributes["ActionCode"].Value != "C") 
+                    {
+                        rootNode.RemoveChild(lastCTR);
+                        lastCTR = doc.SelectSingleNode("(//CustomerTransactionRequest)[last()]", nsMgr);
+                    }
+
+                    
+                    lastCTR = doc.SelectSingleNode("(//CustomerTransactionRequest)[last()]", nsMgr);
+                    while (lastCTR.Attributes["TransactionType"].Value == "814" &&
+                           lastCTR.Attributes["ActionCode"].Value == "C" &&
+                           lastCTR.Attributes["Direction"].Value == "1") 
+                    {
+                        rootNode.RemoveChild(lastCTR);
+                        lastCTR = doc.SelectSingleNode("(//CustomerTransactionRequest)[last()]", nsMgr);
+                    }
+                    var last814C = doc.SelectSingleNode("(//daes_AEPEnergyMarket..tbl_814_header)[last()]", nsMgr);
+                    last814C.Attributes["ProcessFlag"].Value = "0";
+                    last814C.Attributes.Remove(last814C.Attributes["ProcessDate"]);
+                    doc.Save(path);
+
+                    //disable triggers on ChangeRequest table
+                    //DB.ExecuteQuery("ALTER TABLE ChangeRequest DISABLE TRIGGER ALL", connectionString);
+                },
+                connectionString =>
+                {
+                    //DB.ExecuteQuery("ALTER TABLE ChangeRequest ENABLE TRIGGER ALL", connectionString);
+                    //DB.ExecuteQuery("UPDATE daes_AEPEnergy..EventEvaluationQueue SET Status = 0 WHERE EventEvaluationQueueId = (SELECT TOP 1 EventEvaluationQueueID FROM daes_AEPEnergy..EventEvaluationQueue ORDER BY 1 DESC)", connectionString);
+                    
+                });
+
+            ExecuteImportChangeRequests();
+
+            GenerateEvents(new List<int> { 27 });//ChangeRequestEvaluation
+            ProcessEvents();
+            GenerateEvents(new List<int> { 27 });//ChangeRequestEvaluation
+            ProcessEvents();
+        }
+
+        private static void SimulateRollover_AESCIS_16615_From814CAccept(int custId)
+        {
+            // delete the previous tests data
+            var cleanOldTestArtifacts = $@"
+-- delete last inbound 814_C 
+DELETE t FROM (
+SELECT * FROM CustomerTransactionRequest WHERE CustId = {custId} AND TransactionType = '814' AND ActionCode = 'C' AND Direction = 1 AND RequestId > 
+    (SELECT MAX(RequestId) FROM CustomerTransactionRequest WHERE CustId = {custId} AND TransactionType = '814' AND ActionCode = 'C' AND Direction = 0)
+) t
+
+-- delete rateDetails
+ALTER TABLE RateDetail DISABLE TRIGGER ALL
+DELETE FROM RateDetail WHERE RateId IN (SELECT RateId FROM Customer WHERE CustId = {custId} ) AND NOT EXISTS(SELECT 1 FROM InvoiceDetail WHERE RateDetId = RateDetail.RateDetId)
+DELETE FROM RateDetailHistory WHERE RateId IN (SELECT RateId FROM Customer WHERE CustId = {custId} )
+ALTER TABLE RateDetail ENABLE TRIGGER ALL
+
+-- delete changeRequests
+ALTER TABLE ChangeRequest DISABLE TRIGGER ALL
+DELETE FROM ChangeRequest WHERE CustomerID = {custId}
+DELETE FROM ChangeRequestHistory WHERE CustomerID = {custId}
+ALTER TABLE ChangeRequest ENABLE TRIGGER ALL
+
+-- delete rateTransitions
+ALTER TABLE RateTransition DISABLE TRIGGER ALL
+DELETE FROM RateTransition WHERE CustId = {custId}
+DELETE FROM RateTransitionHistory WHERE CustId = {custId}
+ALTER TABLE RateTransition ENABLE TRIGGER ALL
+
+-- disable EventEvaluationQueue
+UPDATE EventEvaluationQueue SET Status = 1 
+
+";
+            DB.ExecuteQuery(cleanOldTestArtifacts, _appConfig.ConnectionCsr);
+
+            var sql = string.Format(MockData.ExportScripts.ExportCustomer4SimulateRollover814CAccept, custId);
+            DB.ImportQueryResultsFromProduction(sql, _appConfig.ConnectionCsr, _appDirectory,
+                (path, connectionString) =>
+                {
+                    var doc = new XmlDocument();
+                    doc.Load(path);
+
+                    XmlNamespaceManager nsMgr = new XmlNamespaceManager(doc.NameTable);
+                    var rootNode = doc.SelectSingleNode("root", nsMgr);
+
+                    var changeRequest = doc.SelectSingleNode("(//ChangeRequest)[last()]", nsMgr);
+                    /*
+                     ChangeRequestStatusID	Description
+                     1	                    new
+                     2	                    pending approval
+                     3	                    approved
+                     4	                    rejected
+                     5	                    processed
+                     6	                    error
+                     7	                    scheduled
+                     8	                    pending market approval
+                     9	                    market approved
+                     10                 	market rejected
+                     11                 	cancelled
+                    */
+                    changeRequest.Attributes["StatusID"].Value = "8";
+
+                    //delete the rt rollovered after
+                    var lastRateTransition = doc.SelectSingleNode("(//RateTransition)[last()]", nsMgr);
+                    rootNode.RemoveChild(lastRateTransition);
+
+                    lastRateTransition = doc.SelectSingleNode("(//RateTransition)[last()]", nsMgr);
+                    /*
+                     -1 Failed, 1 Pending, 2 Complete, 5 Market Approved
+                     */
+                    lastRateTransition.Attributes["StatusID"].Value = "1";
+                    lastRateTransition.Attributes["SwitchDate"].Value = lastRateTransition.Attributes["SoldDate"].Value;
+                    var lastRtSwitchDate = DateTime.Parse(lastRateTransition.Attributes["SoldDate"].Value);
+                    
+                    //rollovered products usually has 1 month Terms
+                    lastRateTransition.Attributes["EndDate"].Value = lastRtSwitchDate.AddMonths(1).ToString("yyyy-MM-ddT00:00:00");
+
+                    var allRateTransitions = doc.SelectNodes("(//RateTransition)");
+                    foreach (XmlNode rateTransition in allRateTransitions)
+                    {
+                        if (rateTransition.Attributes["UserID"].Value == "289")
+                        {
+                            //update the dates according 1 year term
+                            var rtSwitchDate = DateTime.Parse(rateTransition.Attributes["SwitchDate"].Value);
+
+                            //rollovered products usually has 1 month Terms
+                            rateTransition.Attributes["EndDate"].Value = rtSwitchDate.AddMonths(12).ToString("yyyy-MM-ddT00:00:00");
+                            rateTransition.Attributes["StatusID"].Value = "5";
+                        }
+                    }
+
+                    var lastCTR = doc.SelectSingleNode("(//CustomerTransactionRequest)[last()]", nsMgr);
+                    while (lastCTR.Attributes["TransactionType"].Value != "814"
+                           || lastCTR.Attributes["ActionCode"].Value != "C")
+                    {
+                        rootNode.RemoveChild(lastCTR);
+                        lastCTR = doc.SelectSingleNode("(//CustomerTransactionRequest)[last()]", nsMgr);
+                    }
+
+
+                    lastCTR = doc.SelectSingleNode("(//CustomerTransactionRequest)[last()]", nsMgr);
+                    while (lastCTR.Attributes["TransactionType"].Value == "814" &&
+                           lastCTR.Attributes["ActionCode"].Value == "C" &&
+                           lastCTR.Attributes["Direction"].Value == "1")
+                    {
+                        rootNode.RemoveChild(lastCTR);
+                        lastCTR = doc.SelectSingleNode("(//CustomerTransactionRequest)[last()]", nsMgr);
+                    }
+
+                    var last814C = doc.SelectSingleNode("(//daes_AEPEnergyMarket..tbl_814_header)[last()]", nsMgr);
+                    last814C.Attributes["ProcessFlag"].Value = "0";
+                    last814C.Attributes.Remove(last814C.Attributes["ProcessDate"]);
+
+                    last814C = doc.SelectSingleNode("(//daes_AEPEnergyMarket..tbl_814_header)[last()-1]", nsMgr);
+                    last814C.Attributes["ProcessFlag"].Value = "0";
+                    last814C.Attributes.Remove(last814C.Attributes["ProcessDate"]);
+
+                    doc.Save(path);
+
+                    //disable triggers on ChangeRequest table
+                    //DB.ExecuteQuery("ALTER TABLE ChangeRequest DISABLE TRIGGER ALL", connectionString);
+                },
+                connectionString =>
+                {
+                    //DB.ExecuteQuery("ALTER TABLE ChangeRequest ENABLE TRIGGER ALL", connectionString);
+                    //DB.ExecuteQuery("UPDATE daes_AEPEnergy..EventEvaluationQueue SET Status = 0 WHERE EventEvaluationQueueId = (SELECT TOP 1 EventEvaluationQueueID FROM daes_AEPEnergy..EventEvaluationQueue ORDER BY 1 DESC)", connectionString);
+
+                });
+
+            ExecuteImportChangeRequests();
+
+            GenerateEvents(new List<int> { 27 });//ChangeRequestEvaluation
+            ProcessEvents();
+            GenerateEvents(new List<int> { 27 });//ChangeRequestEvaluation
+            ProcessEvents();
         }
 
         private static void simulate_AESCIS16615_WS()
@@ -303,7 +563,7 @@ UPDATE CustomerTransactionRequest SET ProcessFlag = 1, ProcessDate=GetDate(), Ev
             //will create event queue for CTR
             //maintenance.Sim();
             */
-        }
+                }
 
         private static void GenerateEvents(List<int> eventTypeIds)
         {
